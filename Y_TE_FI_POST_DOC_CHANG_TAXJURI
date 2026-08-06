@@ -1,0 +1,38 @@
+FUNCTION y_te_fi_post_doc_chang_taxjuri.
+*"----------------------------------------------------------------------
+*"*"Local Interface:
+*"  IMPORTING
+*"     REFERENCE(IS_TAX) TYPE  CTE_S_FIN_POST_DOC_TAX
+*"     REFERENCE(IS_DOCUMENT_DATA) TYPE  CTE_S_FIN_POST_DOCUMENT
+*"  EXPORTING
+*"     REFERENCE(ET_MESSAGE) TYPE  CTE_T_T100_MSG
+*"  CHANGING
+*"     REFERENCE(CV_TAX_JURISDICTION_CODE) TYPE  TXJCD
+*"----------------------------------------------------------------------
+************************************************************************
+* Change-Number   Date       Who           Description
+* 7200026293      07.06.2026 kraussie      Set tax jurisdiction code to XE 0000000 for Brazil country of company code
+************************************************************************
+
+  DATA lv_countrycode TYPE land1.
+  FIELD-SYMBOLS <fs_add_data> TYPE cte_s_additional_data.
+
+  CLEAR: et_message.
+
+* Get the country of the company code
+* Read the company country code from additional data, field EMPLOYEE CUSTOM5 CODE
+  CLEAR: lv_countrycode.
+  READ TABLE is_document_data-additional_data ASSIGNING <fs_add_data> "#EC CI_STDSEQ
+  WITH KEY name = 'EMPLOYEE_CUSTOM5_CODE'.
+  IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+    IF <fs_add_data>-value IS NOT INITIAL.
+      lv_countrycode = <fs_add_data>-value.
+    ENDIF.
+  ENDIF.
+
+  IF lv_countrycode = 'BR'.
+    cv_tax_jurisdiction_code = 'XE 0000000'.
+  ENDIF.
+
+
+ENDFUNCTION.
