@@ -1,0 +1,790 @@
+FUNCTION y_te_fi_post_adjust_document .
+*"----------------------------------------------------------------------
+*"*"Local Interface:
+*"  IMPORTING
+*"     REFERENCE(IS_DOCUMENT_DATA) TYPE  CTE_S_FIN_POST_DOCUMENT
+*"  EXPORTING
+*"     REFERENCE(ET_MESSAGE) TYPE  CTE_T_FIN_POST_MESSAGE
+*"  CHANGING
+*"     REFERENCE(CT_ACCCR) TYPE  CTE_T_ACCCR
+*"     REFERENCE(CT_ACCIT) TYPE  CTE_T_ACCIT
+*"     REFERENCE(CT_ACCHD) TYPE  CTE_T_ACCHD
+*"     REFERENCE(CT_ACCFI) TYPE  CTE_T_ACCFI OPTIONAL
+*"     REFERENCE(CT_ACCTX) TYPE  CTE_T_ACCBSET
+*"     REFERENCE(CT_ACCREL) TYPE  CTE_T_FIN_POST_ENTRY_ITEM_REL
+*"     REFERENCE(CT_ACC_TAX_REL) TYPE  CTE_T_FIN_POST_TAX_BUZEI_REL
+*"----------------------------------------------------------------------
+************************************************************************
+* Program name: YCTE_FI_POST_ADJUST_DOC
+* Purpose of program: Adjust FI Posting Document of Expense Report
+************************************************************************
+* Description:
+*
+* Change Log:
+* Change-Number   Date       Who           Description
+* 7200020812      29.10.2024 kraussie      Initial
+************************************************************************
+* Change Log:
+* Change-Number   Date       Who           Description
+* 7200023062      14.07.2025 kraussie      Handling of foreign tax.Derivation
+*                                          of company code from Report Org Unit2 Code
+************************************************************************
+* Change-Number   Date       Who           Description
+* 7200024106      03.11.2025 kraussie      Pcode Mapping from Concur Org Unit 6 to BSEG-YYPCODE
+*                                          Map Legacy Entry ID to BSEG-ZUONR in Mexico
+*                                          Vendor Posting to be replaced by GL default account 2571010000 in Italy
+*                                          POP Code for Reference Key 3 in vendor line, based on customizing table
+************************************************************************
+* Change-Number   Date       Who           Description
+* 7200025109      26.02.2026 kraussie      Spain localization
+************************************************************************
+* Change-Number   Date       Who           Description
+* 7200025916      01.06.2026 kraussie      Bug fix for Italy
+************************************************************************
+* Change-Number   Date       Who           Description
+* 7200026293      13.07.2026 kraussie      BAdI: Wave 3
+*                                          1. Brazil Jurisdiction Code (withdrawn)
+*                                          2.	PL/KZ Line Item Text  to be maintained in BSEG-SGTXT () Report Key and Business Purpose from Concur
+*                                          3.	Croatia, Serbia, Slovenia, Lithuania, Bosnia  CBCP Postings for Personal spend to be posted as separate Employee Debit posting with A block BSEG-ZLSPR
+*                                          4. Map LEMS ID from Custom 9 of Concur Allocation to SAP LEMS ID field BSEG-YYLEMSID
+************************************************************************
+
+
+* Data declaration
+  CONSTANTS lc_gl_account TYPE hkont VALUE '2571010000'.
+  DATA lv_submit_date(10) TYPE c.
+  DATA lv_expense_country TYPE string.
+  DATA lv_home_country TYPE string.
+  DATA lv_compcode TYPE bukrs.
+  DATA lv_mwskz TYPE mwskz.
+  DATA ls_acctx TYPE accbset.
+  DATA lt_popcod TYPE STANDARD TABLE OF yte_c_popcod.
+  DATA lt_ablock TYPE STANDARD TABLE OF yte_c_ablock.
+  DATA lv_pcode TYPE yca_itaxpcode.
+  DATA lv_zuonr TYPE dzuonr.
+  DATA lv_countrycode TYPE land1.
+  DATA lt_es_local TYPE STANDARD TABLE OF yte_c_es_local.
+  DATA lv_lemsid TYPE yca_lemsid.
+  DATA lt_allocation TYPE cte_t_fin_post_doc_allocation.
+  DATA ls_accit TYPE accit.
+  DATA ls_accit_vendor TYPE accit.
+  DATA ls_acccr_vendor TYPE acccr.
+  DATA lt_accit_31 TYPE TABLE OF accit.
+  DATA lt_accit_21 TYPE TABLE OF accit.
+  DATA lt_accit_cash TYPE TABLE OF accit.
+  DATA ls_acccr TYPE acccr.
+  DATA lt_acccr TYPE TABLE OF acccr.
+  DATA lt_acccr_cash TYPE TABLE OF acccr.
+  DATA lv_sum TYPE acbtr_rw.
+  FIELD-SYMBOLS <fs_ablock> TYPE yte_c_ablock.
+  FIELD-SYMBOLS <fs_journal> TYPE cte_s_fin_post_doc_journal.
+  FIELD-SYMBOLS <fs_entry> TYPE cte_s_fin_post_doc_entry.
+  FIELD-SYMBOLS <fs_accit> TYPE accit.
+  FIELD-SYMBOLS <fs_acctx> TYPE accbset.
+  FIELD-SYMBOLS <fs_add_data> TYPE cte_s_additional_data.
+  FIELD-SYMBOLS <fs_accrel> TYPE cte_s_fin_post_entry_item_rel.
+  FIELD-SYMBOLS <fs_accrel1> TYPE cte_s_fin_post_entry_item_rel.
+  FIELD-SYMBOLS <fs_acccr> TYPE acccr.
+  FIELD-SYMBOLS <fs_popcod> TYPE yte_c_popcod.
+  FIELD-SYMBOLS <fs_es_local> TYPE yte_c_es_local.
+  FIELD-SYMBOLS <fs_acc_tax_rel> TYPE cte_s_fin_post_tax_buzei_rel.
+  FIELD-SYMBOLS <fs_allocation> TYPE cte_s_fin_post_doc_allocation.
+
+************************************************************************
+* Read the header level information
+************************************************************************
+* Read the Report Submit Date.
+  READ TABLE is_document_data-additional_data
+  ASSIGNING <fs_add_data>
+  WITH KEY name = 'SUBMIT_DATE'  .
+  IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+    CONCATENATE <fs_add_data>-value+0(4) <fs_add_data>-value+5(2) <fs_add_data>-value+8(2) INTO lv_submit_date.
+    CONDENSE lv_submit_date.
+  ENDIF.
+* Read the Home country code
+  READ TABLE is_document_data-additional_data
+  ASSIGNING <fs_add_data>
+  WITH KEY name = 'HOME_COUNTRY_CODE' .
+  IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+    lv_home_country = <fs_add_data>-value. " Home country code
+  ENDIF.
+* Read the Report Org Unit2 Code (Company Code)
+  READ TABLE is_document_data-additional_data
+  ASSIGNING <fs_add_data>
+   WITH KEY  name = 'REPORT_ORG_UNIT2_CODE' .
+  IF sy-subrc = 0 .
+    lv_compcode = <fs_add_data>-value. " Company Code
+  ENDIF.
+************************************************************************
+* Get the customizing
+************************************************************************
+* Check if foreign tax special code is configured in the customizing table
+  SELECT SINGLE mwskz FROM  ycte_fi_c_taxmap INTO lv_mwskz  WHERE bukrs = lv_compcode. "#EC CI_SUBRC
+  IF sy-subrc <> 0.
+    CLEAR lv_mwskz.
+  ENDIF.
+
+  SELECT * FROM yte_c_popcod INTO TABLE lt_popcod WHERE bukrs = lv_compcode.
+  IF sy-subrc <> 0.
+    CLEAR lt_popcod.
+  ENDIF.
+
+  SELECT * FROM yte_c_es_local INTO TABLE lt_es_local WHERE bukrs = lv_compcode.
+  IF sy-subrc <> 0.
+    CLEAR lt_es_local.
+  ENDIF.
+
+  SELECT * FROM yte_c_ablock INTO TABLE lt_ablock WHERE bukrs = lv_compcode.
+  IF sy-subrc <> 0.
+    CLEAR lt_ablock.
+  ENDIF.
+************************************************************************
+* Change For every Vendor posting, on the  vendor line we have on the Text field:
+*Text should include the following string: * {Submit Date} {Report_Name}
+************************************************************************
+  LOOP AT ct_accrel ASSIGNING <fs_accrel>
+  WHERE item_type = 'EVD' OR " Employee Vendor
+        item_type = 'EDB' OR " Employee Vendor Debit
+        item_type = 'CCD' OR "Credit Card Vendor Debit
+        item_type = 'CVD' .  " Credit Card Vendor
+    IF <fs_accrel> IS ASSIGNED.
+      READ TABLE ct_accit ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr .
+      IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+        CLEAR <fs_accit>-sgtxt.
+        CONCATENATE '*' lv_submit_date is_document_data-report_name INTO <fs_accit>-sgtxt SEPARATED BY space. "* {Submit Date} {Report_Name}
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  LOOP AT is_document_data-entry ASSIGNING <fs_entry>.
+    IF <fs_entry> IS ASSIGNED.
+**********************************************************************************************
+*Whenever Payment type is IBCP,  the global ID (EmpoyeeID ex. gi12345678)  should be put in the
+* assignment field of the vendor line .
+*When Payment Type is CBCP,  the global ID (EmpoyeeID ex. gi12345678) should be put in the
+* assignment field of the accounting line of the clearing account code (ie. 25710200000)"
+**********************************************************************************************
+* Check if it is IBCP or CBCP
+      READ TABLE <fs_entry>-additional_data
+       ASSIGNING <fs_add_data>
+      WITH KEY name = 'ENTRY_PAYMENT_TYPE_CODE' .
+      IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED .
+        IF <fs_add_data>-value = 'IBCP' OR <fs_add_data>-value = 'CBCP'. "only for IBCP and CBCP
+          LOOP AT ct_accrel ASSIGNING <fs_accrel>
+           WHERE entry_id = <fs_entry>-entry_id.
+            IF <fs_accrel> IS ASSIGNED.
+              IF <fs_accrel>-item_type = 'EXP' OR
+                 <fs_accrel>-item_type = 'TAX' .
+              ELSE. " the corresponding vendor line or account line
+                READ TABLE ct_accit ASSIGNING <fs_accit>
+                WITH KEY posnr = <fs_accrel>-posnr .
+                IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+                  <fs_accit>-zuonr = is_document_data-employee_id. "Employee ID
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+      ENDIF.
+*********************************************************************************************
+* Handling of foreign tax. In certain countries, the foreign tax is defaulted to 99, but for some
+* countries it should have special code. This special code is derived from the customizing
+* table.
+*********************************************************************************************
+* Check if it is foreign expense by comparing the  home country code with the entry country code
+      READ TABLE <fs_entry>-additional_data
+      ASSIGNING <fs_add_data>
+      WITH KEY name = 'ENTRY_COUNTRY_CODE' .
+      IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+        lv_expense_country = <fs_add_data>-value. " Entry country code
+      ENDIF.
+
+      IF lv_expense_country <> lv_home_country. " foreign expense
+        IF lv_mwskz IS NOT INITIAL. "if foreign special code is customized
+          READ TABLE ct_accrel ASSIGNING <fs_accrel1>
+          WITH KEY entry_id = <fs_entry>-entry_id
+                   item_type = 'TAX'.               "to know if there is tax associated for the entry
+          IF sy-subrc = 0  .
+            LOOP AT ct_accrel ASSIGNING <fs_accrel>
+              WHERE entry_id = <fs_entry>-entry_id .
+              IF <fs_accrel> IS ASSIGNED.
+                IF <fs_accrel>-item_type = 'EXP' OR
+                   <fs_accrel>-item_type = 'TAX' .
+                  READ TABLE ct_accit ASSIGNING <fs_accit>
+                  WITH KEY posnr = <fs_accrel>-posnr .
+                  IF sy-subrc = 0 .
+                    <fs_accit>-mwskz = lv_mwskz. "Foreign Tax code
+* Also adjust the tax table (ct_acctx)
+                    IF <fs_accrel>-item_type = 'TAX' AND <fs_accit>-buzei IS NOT INITIAL .
+                      READ TABLE ct_acctx ASSIGNING <fs_acctx>
+                      WITH KEY buzei = <fs_accit>-buzei .
+                      IF sy-subrc = 0 .
+                        <fs_acctx>-mwskz = lv_mwskz.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDLOOP.
+          ELSE. "only Expense no Tax (0 percent tax)
+            READ TABLE ct_accrel ASSIGNING <fs_accrel>
+            WITH KEY entry_id = <fs_entry>-entry_id
+                     item_type = 'EXP'.
+            IF sy-subrc = 0 .
+              READ TABLE ct_accit ASSIGNING <fs_accit>
+              WITH KEY posnr = <fs_accrel>-posnr .
+              IF sy-subrc = 0 .
+                <fs_accit>-mwskz = lv_mwskz. "Foreign Tax code
+* Also adjust the tax table (ct_acctx)
+                ls_acctx-bukrs = <fs_accit>-bukrs.
+                ls_acctx-mwskz = lv_mwskz.
+                ls_acctx-shkzg = <fs_accit>-shkzg.
+                ls_acctx-ktosl = 'VST'.
+                ls_acctx-kschl = 'MWVS'.
+                ls_acctx-blart = <fs_accit>-blart.
+                READ TABLE ct_acccr ASSIGNING <fs_acccr>
+                 WITH KEY posnr = <fs_accrel>-posnr .
+                IF sy-subrc = 0 .
+                  ls_acctx-fwbas = <fs_acccr>-wrbtr.
+                ENDIF.
+                APPEND ls_acctx TO ct_acctx.
+* Changes 09/2025
+                DELETE ct_acctx
+                WHERE mwskz = '99'
+                AND hkont IS NOT INITIAL.
+* End of chnages 09/2025
+                CLEAR ls_acctx.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      CLEAR: lv_expense_country.
+    ENDIF.
+  ENDLOOP.
+
+*********************************************************************************************
+* Pcode Mapping from Concur Org Unit 6 to BSEG-YYPCODE, country scope: all
+*********************************************************************************************
+  LOOP AT is_document_data-entry ASSIGNING <fs_entry>.
+    IF <fs_entry> IS ASSIGNED.
+      CLEAR: lv_pcode.
+*     Fetch the Pcode from entry additional data, field ENTRY ORGUNIT 6
+      READ TABLE <fs_entry>-additional_data ASSIGNING <fs_add_data>
+      WITH KEY name = 'ENTRY_ORG_UNIT6_CODE'.
+      IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+        IF <fs_add_data>-value IS NOT INITIAL.
+          lv_pcode = <fs_add_data>-value.
+        ELSE.
+          READ TABLE <fs_entry>-additional_data ASSIGNING <fs_add_data>
+          WITH KEY name = 'ENTRY_ORG_UNIT6_VALUE'.
+          IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+            IF <fs_add_data>-value IS NOT INITIAL.
+              lv_pcode = <fs_add_data>-value.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+*     Store Pcode value to bseg-yypcode if provided
+      IF lv_pcode IS NOT INITIAL.
+        LOOP AT ct_accrel ASSIGNING <fs_accrel> WHERE entry_id = <fs_entry>-entry_id.
+          IF sy-subrc = 0 AND <fs_accrel> IS ASSIGNED.
+            IF <fs_accrel>-item_type = 'EXP'.
+              READ TABLE ct_accit ASSIGNING <fs_accit>
+              WITH KEY posnr = <fs_accrel>-posnr.
+              IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+                <fs_accit>-yypcode = lv_pcode.
+                EXIT.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+*********************************************************************************************
+* Map Legacy Entry ID to BSEG-ZUONR in Mexico
+*********************************************************************************************
+* Check if the home country Mexico is
+  IF lv_home_country = 'MX'.
+    LOOP AT is_document_data-entry ASSIGNING <fs_entry>.
+      IF <fs_entry> IS ASSIGNED.
+        CLEAR: lv_zuonr.
+*       Fetch the LEGACY_ENTRY_ID from entry additional data
+        READ TABLE <fs_entry>-additional_data ASSIGNING <fs_add_data>
+        WITH KEY name = 'LEGACY_ENTRY_ID'.
+        IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+          IF <fs_add_data>-value IS NOT INITIAL.
+            lv_zuonr = <fs_add_data>-value.
+          ENDIF.
+        ENDIF.
+
+*       Save the LEGACY ENTRY ID into zuonr
+        IF lv_zuonr IS NOT INITIAL.
+          LOOP AT ct_accrel ASSIGNING <fs_accrel> WHERE entry_id = <fs_entry>-entry_id.
+            IF sy-subrc = 0 AND <fs_accrel> IS ASSIGNED.
+              IF <fs_accrel>-item_type = 'EXP'.
+                READ TABLE ct_accit ASSIGNING <fs_accit>
+                WITH KEY posnr = <fs_accrel>-posnr.
+                IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+                  <fs_accit>-zuonr = lv_zuonr.
+                  EXIT.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+
+*********************************************************************************************
+* Vendor Posting to be replaced by GL default account 2571010000 in Italy
+*********************************************************************************************
+* Read the company country code from additional data, field EMPLOYEE CUSTOM5 CODE
+  CLEAR: lv_countrycode.
+  READ TABLE is_document_data-additional_data ASSIGNING <fs_add_data>
+  WITH KEY name = 'EMPLOYEE_CUSTOM5_CODE'.
+  IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+    IF <fs_add_data>-value IS NOT INITIAL.
+      lv_countrycode = <fs_add_data>-value.
+    ENDIF.
+  ENDIF.
+
+* Check if the country is Italy
+  IF lv_countrycode = 'IT'.
+*   Check if the company code is 0050, 0067 or 3338
+    IF lv_compcode = '0050' OR lv_compcode = '0067' OR lv_compcode = '3328'. "old: lv_compcode = '3338' - 01.06.2026  CR 7200025916
+*     Change HKONT to 2571010000 of vendor line
+      LOOP AT ct_accrel ASSIGNING <fs_accrel>
+          WHERE item_type = 'EVD' OR " Employee Vendor
+            item_type = 'EDB' OR " Employee Vendor Debit
+            item_type = 'CCD' OR "Credit Card Vendor Debit
+            item_type = 'CVD' .  " Credit Card Vendor.
+        IF <fs_accrel> IS ASSIGNED.
+          READ TABLE ct_accit ASSIGNING <fs_accit>
+          WITH KEY posnr = <fs_accrel>-posnr.
+          IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+            <fs_accit>-hkont = lc_gl_account.               "2571010000
+            CLEAR <fs_accit>-lifnr.                         "clear vendor id
+            IF <fs_accit>-bschl = '21'.                       " 01.06.2026  CR 7200025916
+              <fs_accit>-bschl = '40'.                        "posting key changed from 21 to 40 for credit - 01.06.2026  CR 7200025916
+            ELSE.
+              <fs_accit>-bschl = '50'.                        "posting key changed from 31 to 50 for debit
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+
+*********************************************************************************************
+* POP Code for Reference Key 3 in vendor line, based on customizing table
+*********************************************************************************************
+* check company code if it is customized in table
+  READ TABLE lt_popcod ASSIGNING <fs_popcod>
+  WITH KEY bukrs = is_document_data-company_code_employee.
+  IF sy-subrc = 0 AND <fs_popcod> IS ASSIGNED.
+*   find posnr that has vendor line
+    LOOP AT ct_accrel ASSIGNING <fs_accrel>.  "Change read table to loop
+      IF <fs_accrel>-item_type = 'EVD' OR " Employee Vendor
+        <fs_accrel>-item_type = 'EDB' OR " Employee Vendor Debit
+        <fs_accrel>-item_type = 'CCD' OR "Credit Card Vendor Debit
+        <fs_accrel>-item_type = 'CVD' .  " Credit Card Vendor IS ASSIGNED.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF sy-subrc = 0 AND <fs_accrel> IS ASSIGNED.
+      READ TABLE ct_accit ASSIGNING <fs_accit>
+      WITH KEY posnr = <fs_accrel>-posnr.
+      IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+        <fs_accit>-xref3 = <fs_popcod>-pop_code.
+        IF <fs_popcod>-pop_code = ''.
+*         If no value default to STR
+          <fs_accit>-xref3 = 'STR'.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  CLEAR: lv_submit_date, lv_home_country, lv_compcode, lv_mwskz, lt_popcod.
+*********************************************************************************************
+* Change Number 7200025109
+* Spain localization
+* For spanish company code which is maintained in table YTE_C_ES_LOCAL, we will overwrite the
+* tax code in table ct_accit and ct_acctx
+* In addition, the tax base, tax amount and tax percentage in table ct_acccr and ct_acctx have
+* to be recalculated
+* Finally we remove the tax line from ct_accit and ct_acccr
+*********************************************************************************************
+
+* check spanish company code
+  READ TABLE lt_es_local ASSIGNING <fs_es_local>
+    WITH KEY bukrs = is_document_data-company_code_employee.
+  IF sy-subrc = 0 AND <fs_es_local> IS ASSIGNED.
+*   change tax code in ct_accit
+    UNASSIGN <fs_accit>.
+    LOOP AT ct_accit ASSIGNING <fs_accit>.
+      IF <fs_accit> IS ASSIGNED.
+        UNASSIGN <fs_accrel>.
+        READ TABLE ct_accrel ASSIGNING <fs_accrel> WITH KEY posnr = <fs_accit>-posnr.
+        IF sy-subrc = 0.
+          IF <fs_accrel>-item_type = 'CAD' OR " Credit
+          <fs_accrel>-item_type = 'CAL'.      " CBCP
+*          the clearing account is a Balance Sheet account so no tax code required
+            CLEAR <fs_accit>-mwskz.
+          ELSE.
+            <fs_accit>-mwskz =  <fs_es_local>-tax_ind.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+*   recalculate tax base, tax amount and tax percentage in ct_acctx
+*   also change tax code
+    UNASSIGN <fs_acctx>.
+    LOOP AT ct_acctx ASSIGNING <fs_acctx>.
+      IF <fs_acctx> IS ASSIGNED.
+        <fs_acctx>-mwskz =  <fs_es_local>-tax_ind.
+        <fs_acctx>-fwbas =  <fs_acctx>-fwbas + <fs_acctx>-fwste.
+        CLEAR: <fs_acctx>-fwste, <fs_acctx>-kbetr.
+        <fs_acctx>-fwste =  ( <fs_acctx>-fwbas * <fs_es_local>-tax_rate ) / 100.
+        <fs_acctx>-kbetr = <fs_es_local>-tax_rate * 10.
+      ENDIF.
+    ENDLOOP.
+
+*   remove tax line in ct_accit and ct_acccr
+    UNASSIGN <fs_accrel>.
+    LOOP AT ct_accrel ASSIGNING <fs_accrel> WHERE item_type = 'TAX'.
+      DELETE ct_accit WHERE posnr = <fs_accrel>-posnr.
+      DELETE ct_acccr WHERE posnr = <fs_accrel>-posnr.
+    ENDLOOP.
+
+*   recalculate tax base and tax amount in ct_acccr
+    UNASSIGN <fs_acccr>.
+    LOOP AT ct_acccr ASSIGNING <fs_acccr>.
+      UNASSIGN <fs_accrel>.
+      READ TABLE ct_accrel ASSIGNING <fs_accrel> WITH KEY posnr = <fs_acccr>-posnr.
+      IF sy-subrc = 0.
+*       ignore vendor line, CBCP, Credit and tax line
+        IF <fs_accrel>-item_type = 'EVD' OR " Employee Vendor
+        <fs_accrel>-item_type = 'EDB' OR    " Employee Vendor Debit
+        <fs_accrel>-item_type = 'CCD' OR    "Credit Card Vendor Debit
+        <fs_accrel>-item_type = 'CVD' OR    " Credit Card Vendor IS ASSIGNED.
+        <fs_accrel>-item_type = 'TAX' OR      "Tax line
+        <fs_accrel>-item_type = 'CAD' OR      "Credit
+        <fs_accrel>-item_type = 'CAL'.      "CBCP
+          CONTINUE.
+        ELSE.   "EXP or EXC
+          UNASSIGN <fs_acc_tax_rel>.
+          READ TABLE ct_acc_tax_rel ASSIGNING <fs_acc_tax_rel> WITH KEY entry_id = <fs_accrel>-entry_id
+            alloc_id = <fs_accrel>-alloc_id.
+          IF sy-subrc = 0.
+            UNASSIGN  <fs_acctx>.
+            READ TABLE ct_acctx ASSIGNING <fs_acctx> WITH KEY buzei = <fs_acc_tax_rel>-buzei.
+            IF sy-subrc = 0.
+              IF <fs_acccr>-wrbtr < 0 AND <fs_acctx>-shkzg = 'H'.  "credit EXC
+                <fs_acccr>-wrbtr = 0 - <fs_acctx>-fwbas.
+              ELSE. "normal EXP
+                <fs_acccr>-wrbtr = <fs_acctx>-fwbas.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+************************************************************************
+* Change-Number   7200026293 BAdI: Wave 3
+* 2.  PZ/KZ Line Item Text to be maintained in BSEG-SGTXT
+* Mapping reportKey and entryDescription to BSEG-SGTXT
+************************************************************************
+* check company code if it is customized in table
+  CLEAR: lv_countrycode.
+  READ TABLE is_document_data-additional_data ASSIGNING <fs_add_data> "#EC CI_STDSEQ
+  WITH KEY name = 'EMPLOYEE_CUSTOM5_CODE'.
+  IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+    IF <fs_add_data>-value IS NOT INITIAL.
+      lv_countrycode = <fs_add_data>-value.
+    ENDIF.
+  ENDIF.
+
+  IF lv_countrycode = 'PL' OR lv_countrycode = 'KZ'.
+    LOOP AT ct_accit ASSIGNING <fs_accit>.
+      IF <fs_accit> IS ASSIGNED.
+        UNASSIGN <fs_accrel>.
+        READ TABLE ct_accrel ASSIGNING <fs_accrel>       "#EC CI_STDSEQ
+        WITH KEY posnr = <fs_accit>-posnr.
+        IF sy-subrc = 0.
+          IF <fs_accrel>-item_type = 'EVD' OR " Employee Vendor
+            <fs_accrel>-item_type = 'EDB' OR " Employee Vendor Debit
+            <fs_accrel>-item_type = 'CCD' OR "Credit Card Vendor Debit
+            <fs_accrel>-item_type = 'CVD' .  " Credit Card Vendor IS ASSIGNED.
+            CONTINUE.                         "Skip the vendor item
+          ELSE.
+            UNASSIGN <fs_entry>.
+* Get the entry
+            READ TABLE is_document_data-entry ASSIGNING <fs_entry> WITH KEY entry_id = <fs_accrel>-entry_id. "#EC CI_STDSEQ
+            IF sy-subrc = 0.
+* Get the entry additional data
+              READ TABLE  <fs_entry>-additional_data ASSIGNING <fs_add_data> "#EC CI_STDSEQ
+              WITH KEY name = 'ENTRY_DESCRIPTION'.
+              IF sy-subrc = 0.
+                CONCATENATE is_document_data-report_key <fs_add_data>-value INTO <fs_accit>-sgtxt SEPARATED BY space.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+
+************************************************************************
+* Change-Number   7200026293 BAdI: Wave 3
+* 3.  Croatia, Serbia, Slovenia, Lithuania, Bosnia  CBCP Postings for Personal spend to be posted
+* as separate Employee Debit posting with A block BSEG-ZLSPR
+************************************************************************
+* check company code if it is customized in table
+  READ TABLE lt_ablock ASSIGNING <fs_ablock>
+    WITH KEY bukrs = is_document_data-company_code_employee.
+  IF sy-subrc = 0.
+    IF <fs_ablock> IS ASSIGNED.
+      CLEAR: lt_accit_31, lt_accit_21, lt_acccr, lt_accit_cash.
+      LOOP AT is_document_data-entry ASSIGNING <fs_entry>.
+        READ TABLE <fs_entry>-additional_data ASSIGNING <fs_add_data> WITH KEY name = 'ENTRY_PAYMENT_TYPE_CODE'.
+        IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
+*      check if CBCP
+          IF <fs_add_data>-value = 'CBCP'.
+            LOOP AT <fs_entry>-allocation ASSIGNING <fs_allocation>.
+              UNASSIGN <fs_journal>.
+              READ TABLE <fs_allocation>-journal WITH KEY payer = 'COMP' payee = 'EMPL' ASSIGNING <fs_journal>.
+              IF sy-subrc = 0 AND <fs_journal> IS ASSIGNED.
+                READ TABLE ct_accrel ASSIGNING <fs_accrel> WITH KEY entry_id = <fs_entry>-entry_id
+                alloc_id = <fs_allocation>-allocation_id.
+                IF sy-subrc = 0 AND <fs_accrel> IS ASSIGNED.
+                  READ TABLE ct_accit ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr.
+                  IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+                    CLEAR: ls_accit.
+                    ls_accit = <fs_accit>.
+                    ls_accit-shkzg = 'H'.
+                    ls_accit-bschl = '31'.
+                    CLEAR: ls_accit-mwskz.
+                    APPEND  ls_accit TO lt_accit_31.
+                    CLEAR: ls_acccr.
+                    READ TABLE ct_acccr ASSIGNING <fs_acccr> WITH KEY posnr = <fs_accrel>-posnr.
+                    IF sy-subrc = 0 AND <fs_acccr> IS ASSIGNED.
+                      ls_acccr = <fs_acccr>.
+                      ls_acccr-wrbtr = 0 - <fs_journal>-gross_amount.
+                      APPEND  ls_acccr TO lt_acccr.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ELSE.
+                UNASSIGN <fs_journal>.
+                READ TABLE <fs_allocation>-journal WITH KEY payer = 'EMPL' payee = 'COMP' ASSIGNING <fs_journal>.
+                IF sy-subrc = 0 AND <fs_journal> IS ASSIGNED.
+                  READ TABLE ct_accrel ASSIGNING <fs_accrel> WITH KEY entry_id = <fs_entry>-entry_id
+                         alloc_id = <fs_allocation>-allocation_id.
+                  IF sy-subrc = 0 AND <fs_accrel> IS ASSIGNED.
+                    READ TABLE ct_accit ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr.
+                    IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+                      CLEAR: ls_accit.
+                      ls_accit = <fs_accit>.
+                      ls_accit-shkzg = 'S'.
+                      ls_accit-bschl = '21'.
+                      CLEAR: ls_accit-mwskz.
+                      APPEND  ls_accit TO lt_accit_21.
+                      CLEAR: ls_acccr.
+                      READ TABLE ct_acccr ASSIGNING <fs_acccr> WITH KEY posnr = <fs_accrel>-posnr.
+                      IF sy-subrc = 0 AND <fs_acccr> IS ASSIGNED.
+                        ls_acccr = <fs_acccr>.
+                        ls_acccr-wrbtr = 0 - <fs_journal>-gross_amount.
+                        APPEND  ls_acccr TO lt_acccr.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDLOOP.
+*      check if CASH
+          ELSEIF <fs_add_data>-value = 'CASH'.
+            LOOP AT <fs_entry>-allocation ASSIGNING <fs_allocation>.
+              UNASSIGN <fs_journal>.
+              READ TABLE <fs_allocation>-journal WITH KEY payer = 'COMP' payee = 'EMPL' ASSIGNING <fs_journal>.
+              IF sy-subrc = 0 AND <fs_journal> IS ASSIGNED.
+                UNASSIGN <fs_accrel>.
+                LOOP AT ct_accrel ASSIGNING <fs_accrel> WHERE entry_id = <fs_entry>-entry_id
+                   AND alloc_id = <fs_allocation>-allocation_id.
+                  IF <fs_accrel>-item_type <> 'EVD' AND " Employee Vendor
+                    <fs_accrel>-item_type <> 'EDB' . " Employee Vendor Debit
+                    EXIT.
+                  ENDIF.
+                ENDLOOP.
+                IF sy-subrc = 0 AND <fs_accrel> IS ASSIGNED.
+                  READ TABLE ct_accit ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr.
+                  IF sy-subrc = 0 AND  <fs_accit> IS ASSIGNED.
+                    CLEAR: ls_accit.
+                    ls_accit = <fs_accit>.
+                    ls_accit-shkzg = 'H'.
+                    ls_accit-bschl = '31'.
+                    CLEAR: ls_accit-mwskz.
+                    APPEND  ls_accit TO lt_accit_cash.
+
+                    CLEAR: ls_acccr.
+                    READ TABLE ct_acccr ASSIGNING <fs_acccr> WITH KEY posnr = <fs_accrel>-posnr.
+                    IF sy-subrc = 0 AND <fs_acccr> IS ASSIGNED.
+                      ls_acccr = <fs_acccr>.
+                      ls_acccr-wrbtr = 0 -  <fs_journal>-gross_amount.
+                      APPEND  ls_acccr TO lt_acccr_cash.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+
+      IF ( lt_accit_cash IS NOT INITIAL AND lt_acccr_cash IS NOT INITIAL ) OR
+          lt_acccr IS NOT INITIAL OR lt_accit_21 IS NOT INITIAL OR lt_accit_31 IS NOT INITIAL.
+*       first save and then delete intial vendor debit/credit line
+        LOOP AT ct_accrel ASSIGNING <fs_accrel> WHERE item_type = 'EVD'  OR " Employee Vendor Credit
+                                                      item_type = 'EDB' . " Employee Vendor Debit .
+*          save
+          CLEAR: ls_accit_vendor, ls_acccr_vendor.
+          READ TABLE ct_accit ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr.
+          IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+            ls_accit_vendor = <fs_accit>.
+          ENDIF.
+
+          READ TABLE ct_acccr ASSIGNING <fs_acccr> WITH KEY posnr = <fs_accrel>-posnr.
+          IF sy-subrc = 0 AND <fs_acccr> IS ASSIGNED.
+            ls_acccr_vendor = <fs_acccr>.
+          ENDIF.
+*          delete
+          DELETE ct_accit WHERE posnr = <fs_accrel>-posnr.
+          DELETE ct_acccr WHERE posnr = <fs_accrel>-posnr.
+        ENDLOOP.
+      ENDIF.
+
+      DESCRIBE TABLE ct_accit LINES DATA(lv_lines).
+      lv_lines = lv_lines + 1. "because we deleted vendor line
+
+*    write cash employee vendor to ct_accit and ct_acccr
+      IF lt_accit_cash IS NOT INITIAL AND lt_acccr_cash IS NOT INITIAL.
+        CLEAR: lv_sum.
+        LOOP AT lt_acccr_cash ASSIGNING <fs_acccr>.
+          lv_sum = lv_sum + <fs_acccr>-wrbtr.
+        ENDLOOP.
+*        ct_accit
+        READ TABLE lt_accit_cash ASSIGNING <fs_accit> INDEX 1.
+        IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+          IF ls_accit_vendor IS NOT INITIAL.
+            <fs_accit> = ls_accit_vendor.
+          ENDIF.
+          <fs_accit>-posnr = lv_lines + 1.
+          IF lv_sum > 0.
+            <fs_accit>-shkzg = 'S'.
+            <fs_accit>-bschl = '21'.
+          ELSEIF lv_sum < 0.
+            <fs_accit>-shkzg = 'H'.
+            <fs_accit>-bschl = '31'.
+          ENDIF.
+          APPEND <fs_accit> TO ct_accit.
+        ENDIF.
+*        ct_acccr
+        READ TABLE lt_acccr_cash ASSIGNING <fs_acccr> INDEX 1.
+        IF sy-subrc = 0 AND  <fs_acccr> IS ASSIGNED.
+          IF ls_acccr_vendor IS NOT INITIAL.
+            <fs_acccr> = ls_acccr_vendor.
+          ENDIF.
+          <fs_acccr>-posnr = lv_lines + 1.
+          <fs_acccr>-wrbtr = lv_sum.
+          APPEND <fs_acccr> TO ct_acccr.
+        ENDIF.
+        lv_lines = lv_lines + 1.
+      ENDIF.
+
+*    write Employee Debit/Credit posting with A block BSEG-ZLSPR to ct_accit and ct_acccr
+      IF lt_acccr IS NOT INITIAL OR lt_accit_21 IS NOT INITIAL OR lt_accit_31 IS NOT INITIAL.
+        CLEAR: lv_sum.
+        LOOP AT lt_acccr ASSIGNING <fs_acccr>.
+          lv_sum = lv_sum + <fs_acccr>-wrbtr.
+        ENDLOOP.
+*        ct_accit
+        IF lv_sum > 0.
+          READ TABLE lt_accit_21 ASSIGNING <fs_accit> INDEX 1.
+          IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+            IF ls_accit_vendor IS NOT INITIAL.
+              <fs_accit> = ls_accit_vendor.
+            ENDIF.
+            <fs_accit>-shkzg = 'S'.
+            <fs_accit>-bschl = '21'.
+          ENDIF.
+        ELSEIF lv_sum < 0.
+          READ TABLE lt_accit_31 ASSIGNING <fs_accit> INDEX 1.
+          IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+            IF ls_accit_vendor IS NOT INITIAL.
+              <fs_accit> = ls_accit_vendor.
+            ENDIF.
+            <fs_accit>-shkzg = 'H'.
+            <fs_accit>-bschl = '31'.
+          ENDIF.
+        ENDIF.
+        IF <fs_accit> IS ASSIGNED.
+          <fs_accit>-posnr = lv_lines + 1.
+*          mark with block A
+          <fs_accit>-zlspr = 'A'.
+          APPEND <fs_accit> TO ct_accit.
+        ENDIF.
+*        ct_acccr
+        READ TABLE lt_acccr ASSIGNING <fs_acccr> INDEX 1.
+        IF sy-subrc = 0 AND <fs_acccr> IS ASSIGNED.
+          IF ls_acccr_vendor IS NOT INITIAL.
+            <fs_acccr> = ls_acccr_vendor.
+          ENDIF.
+          <fs_acccr>-posnr = lv_lines + 1.
+          <fs_acccr>-wrbtr = lv_sum.
+          APPEND <fs_acccr> TO ct_acccr.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+************************************************************************
+* Change-Number   7200026293 BAdI: Wave 3
+* 4.  Map LEMS ID from Custom9 of Concur Allocation to SAP LEMS ID field
+* BESEG-YYLEMSID
+************************************************************************
+  LOOP AT ct_accit ASSIGNING <fs_accit>.
+    IF <fs_accit> IS ASSIGNED.
+      UNASSIGN <fs_accrel>.
+* Get the entry ID
+      READ TABLE ct_accrel ASSIGNING <fs_accrel> WITH KEY posnr = <fs_accit>-posnr. "#EC CI_STDSEQ
+      IF sy-subrc = 0.
+        UNASSIGN <fs_entry>.
+* Get the entry
+        READ TABLE is_document_data-entry ASSIGNING <fs_entry> "#EC CI_STDSEQ
+        WITH KEY entry_id = <fs_accrel>-entry_id.
+        IF sy-subrc = 0.
+          UNASSIGN <fs_add_data>.
+          lt_allocation = <fs_entry>-allocation.
+          LOOP AT lt_allocation ASSIGNING <fs_allocation>. "#EC CI_LOOP_INTO_WA  ##INTO_OK
+            READ TABLE <fs_allocation>-additional_data ASSIGNING <fs_add_data> WITH KEY name = 'ALLOCATION_CUSTOM9_CODE'. "#EC CI_STDSEQ
+            IF sy-subrc = 0.
+              lv_lemsid = <fs_add_data>-value.
+              <fs_accit>-yylemsid = lv_lemsid.
+              EXIT.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+ENDFUNCTION.
