@@ -1,0 +1,43 @@
+METHOD get_entry_data.
+
+  DATA: ls_entry TYPE cte_s_fin_post_doc_entry.
+  DATA: ls_add   TYPE cte_s_additional_data.
+
+  READ TABLE is_document_data-entry INTO ls_entry
+    WITH KEY entry_id = iv_entry_id.
+
+  IF sy-subrc = 0.
+
+    READ TABLE ls_entry-additional_data INTO ls_add
+      WITH KEY name = 'ENTRY_CUSTOM1_CODE'.
+    IF sy-subrc = 0.
+      ev_name1 = ls_add-value.
+    ENDIF.
+
+    READ TABLE ls_entry-additional_data INTO ls_add
+      WITH KEY name = 'ENTRY_CUSTOM2_CODE'.
+    IF sy-subrc = 0.
+      ev_ort01 = ls_add-value.
+    ENDIF.
+
+    READ TABLE ls_entry-additional_data INTO ls_add
+      WITH KEY name = 'ENTRY_CUSTOM3_CODE'.
+    IF sy-subrc = 0.
+      ev_land1 = ls_add-value.
+    ENDIF.
+
+    READ TABLE ls_entry-additional_data INTO ls_add
+      WITH KEY name = 'ENTRY_CUSTOM4_CODE'.
+    IF sy-subrc = 0.
+      ev_stcd1 = ls_add-value.
+    ENDIF.
+
+    READ TABLE ls_entry-additional_data INTO ls_add
+      WITH KEY name = 'ENTRY_CUSTOM16_CODE'.
+    IF sy-subrc = 0.
+      ev_stceg = ls_add-value.
+    ENDIF.
+
+  ENDIF.
+
+ENDMETHOD.
