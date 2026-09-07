@@ -1,0 +1,70 @@
+METHOD condense_employee_vendor.
+
+  FIELD-SYMBOLS:
+    <vendor_item> TYPE accit,
+    <vendor_curr> TYPE acccr.
+
+  DATA:
+    ls_vendor_it  TYPE accit,
+    ls_vendor_crr TYPE acccr.
+
+  DATA: lv_index TYPE sytabix.
+
+** This condensing does NOT support multiple vendor account e.g. for IBCP credit cards
+  LOOP AT cs_clearing_posting-acd_item INTO ls_vendor_it
+    WHERE lifnr IS NOT INITIAL
+      AND lifnr <> '0000001950'. "Only the employee vendor lines should be condensed
+
+    lv_index = sy-tabix.
+
+    IF <vendor_item> IS NOT ASSIGNED.
+      "Remember the first line and update it
+
+      READ TABLE cs_clearing_posting-acd_item ASSIGNING <vendor_item>
+        INDEX sy-tabix.
+
+      READ TABLE cs_clearing_posting-acd_curr ASSIGNING <vendor_curr>
+        WITH KEY
+          awtyp = <vendor_item>-awtyp
+          awref = <vendor_item>-awref
+          aworg = <vendor_item>-aworg
+          posnr = <vendor_item>-posnr.
+
+    ELSE.
+
+      READ TABLE cs_clearing_posting-acd_curr INTO ls_vendor_crr
+        WITH KEY
+          awtyp = ls_vendor_it-awtyp
+          awref = ls_vendor_it-awref
+          aworg = ls_vendor_it-aworg
+          posnr = ls_vendor_it-posnr.
+
+      IF sy-subrc = 0.
+
+        <vendor_curr>-wrbtr = <vendor_curr>-wrbtr + ls_vendor_crr-wrbtr.
+
+        DELETE cs_clearing_posting-acd_curr INDEX sy-tabix.
+        DELETE cs_clearing_posting-acd_item INDEX lv_index.
+
+        DELETE cs_clearing_posting-acd_fi
+          WHERE awtyp = ls_vendor_it-awtyp
+            AND awref = ls_vendor_it-awref
+            AND aworg = ls_vendor_it-aworg
+            AND posnr = ls_vendor_it-posnr.
+
+      ENDIF.
+
+    ENDIF.
+
+  ENDLOOP.
+
+* Now update the posting key and the SHKZG if needed
+  IF <vendor_curr>-wrbtr < 0.
+    <vendor_item>-shkzg = 'H'.
+    <vendor_item>-bschl = '31'.
+  ELSE.
+    <vendor_item>-shkzg = 'S'.
+    <vendor_item>-bschl = '21'.
+  ENDIF.
+
+ENDMETHOD.
