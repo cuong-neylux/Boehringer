@@ -1,0 +1,213 @@
+METHOD if_badi_cte_fin_post_adj_doc~split_posting_document.
+ FIELD-SYMBOLS: <ls_split_doc> TYPE cte_s_fin_post_acc_splits,
+ <ls_accit_old> TYPE accit,
+ <ls_new_split> TYPE cte_s_fin_post_acc_splits,
+ <ls_clearing> TYPE cte_s_fin_post_acc_splits,
+ <ls_cpd_data> TYPE accfi,
+ <ls_header> TYPE acchd.
+ DATA: ls_split_add TYPE cte_s_fin_post_acc_splits,
+ lt_new_split TYPE cte_t_fin_post_acc_splits.
+ DATA: ls_accit TYPE accit.
+ DATA: ls_acccr TYPE acccr.
+ DATA: ls_cpd_new TYPE accfi.
+ DATA: ls_header TYPE acchd.
+ DATA: ls_acctx TYPE accbset.
+ DATA: lv_entry_old TYPE cte_concur_node_id.
+ DATA: lt_entry_rel TYPE cte_t_fin_post_entry_item_rel,
+ ls_entry_rel TYPE cte_s_fin_post_entry_item_rel.
+ DATA: lv_sgtxt_old TYPE sgtxt.
+ DATA: ls_entry TYPE cte_s_fin_post_doc_entry.
+ DATA: ls_add TYPE cte_s_additional_data.
+ DATA: lv_bktxt TYPE bktxt.
+ DATA: lv_inv_type TYPE char3.
+ DATA: lv_inv_date TYPE datum.
+9
+******************************************************************
+** Implement a check to ensure that this coding is only processed
+** for Spanish expense reports
+******************************************************************
+ LOOP AT ct_acc_documents ASSIGNING <ls_split_doc>.
+** Create single documents per expense entry
+ lt_entry_rel = <ls_split_doc>-ACC_ITEM_ENTRY_REL.
+ SORT lt_entry_rel BY entry_id posnr ASCENDING.
+ SORT <ls_split_doc>-acd_item BY posnr.
+ LOOP AT lt_entry_rel INTO ls_entry_rel WHERE journal_id IS NOT INITIAL.
+** Get invoice reference number and invoice type
+ READ TABLE is_document_dataentry INTO ls_entry WITH KEY entry_id = ls_entry_rel-entry_id.
+ IF sy-subrc = 0.
+ READ TABLE ls_entryadditional_data INTO ls_add WITH KEY name = 'ENTRY_CUSTOM5_CODE'.
+ IF sy-subrc = 0.
+ lv_bktxt = ls_add-value.
+ ENDIF.
+ READ TABLE ls_entryadditional_data INTO ls_add WITH KEY name = 'ENTRY_CUSTOM9_CODE'.
+ IF sy-subrc = 0.
+ lv_inv_type = ls_add-value.
+ ENDIF.
+ READ TABLE ls_entryadditional_data INTO ls_add WITH KEY name = 'ENTRY_CUSTOM8_CODE'.
+ IF sy-subrc = 0.
+ lv_inv_date = ls_add-value.
+ ENDIF.
+ ENDIF.
+ READ TABLE <ls_split_doc>-
+acd_item ASSIGNING <ls_accit_old> WITH KEY posnr = ls_entry_rel-posnr.
+ IF ls_entry_rel-entry_id <> lv_entry_old.
+ lv_entry_old = ls_entry_rel-entry_id.
+* A new posting has to be created
+ APPEND INITIAL LINE TO lt_new_split ASSIGNING <ls_new_split>.
+ READ TABLE <ls_split_doc>-acd_header INTO ls_header INDEX 1.
+ APPEND ls_header TO <ls_new_split>-acd_header ASSIGNING <ls_header>.
+ <ls_header>-bktxt = lv_bktxt.
+ ENDIF.
+* For vendor/clearing account lines create an additional clearing posting
+ READ TABLE <ls_split_doc>-
+acd_curr INTO ls_acccr WITH KEY awtyp = <ls_accit_old>-awtyp
+ awref = <ls_acci
+t_old>-awref
+ aworg = <ls_acci
+t_old>-aworg
+ posnr = <ls_acci
+t_old>-posnr.
+ ASSERT sy-subrc = 0.
+ APPEND ls_acccr TO <ls_new_split>-acd_curr.
+ IF <ls_accit_old>-lifnr IS NOT INITIAL
+Commented [ZH1]: Please add a check to ensure that only 
+Spanish expense reports are processed with the following coding.
+Commented [ZH2]: Replace these custom fields by the one 
+which are used in your implementation
+Commented [ZH3]: Replace these custom fields by the one 
+which are used in your implementation
+Commented [ZH4]: Replace these custom fields by the one 
+which are used in your implementation
+10
+ OR <ls_accit_old>-hkont = '0000176880'.
+ IF <ls_clearing> IS NOT ASSIGNED.
+ APPEND INITIAL LINE TO lt_new_split ASSIGNING <ls_clearing>.
+ APPEND ls_header TO <ls_clearing>-acd_header.
+ ENDIF.
+ ls_accit = <ls_accit_old>.
+ ls_accit-posnr = lines( <ls_clearing>-acd_item ) + 1.
+* Reset the SGTXT to the report name
+ CONCATENATE '*'
+ is_document_data-report_name
+INTO ls_accit-sgtxt.
+ APPEND ls_accit TO <ls_clearing>-
+acd_item. "first take over old vendor line item.
+ ls_acccr-posnr = ls_accit-posnr.
+ APPEND ls_acccr TO <ls_clearing>-acd_curr.
+* now create CPD line item
+ <ls_accit_old>-lifnr = '0000001950'.
+ CLEAR <ls_accit_old>-hkont.
+ IF <ls_accit_old>-bschl = '40'.
+ <ls_accit_old>-bschl = '21'.
+ ELSEIF <ls_accit_old>-bschl = '50'.
+ <ls_accit_old>-bschl = '31'.
+ ENDIF.
+ ls_accit = <ls_accit_old>.
+ ls_accit-posnr = lines( <ls_clearing>-acd_item ) + 1.
+*Now create a posting to the same CPD account in the new posting with negative a
+mounts
+ IF ls_accit-bschl = '31'.
+ ls_accit-bschl = '21'.
+ ls_accit-shkzg = 'S'.
+ ELSEIF ls_accit-bschl = '21'.
+ ls_accit-bschl = '31'.
+ ls_accit-shkzg = 'H'.
+ ENDIF.
+ ls_acccr-wrbtr = ls_acccr-wrbtr * -1.
+ ls_acccr-posnr = ls_accit-posnr.
+ APPEND ls_acccr TO <ls_clearing>-acd_curr.
+ APPEND INITIAL LINE TO <ls_new_split>-acd_fi ASSIGNING <ls_cpd_data>.
+ <ls_cpd_data>-mandt = sy-mandt.
+ <ls_cpd_data>-awtyp = <ls_accit_old>-awtyp.
+ <ls_cpd_data>-awref = <ls_accit_old>-awref.
+ <ls_cpd_data>-aworg = <ls_accit_old>-aworg.
+ <ls_cpd_data>-posnr = <ls_accit_old>-posnr.
+ me->get_entry_data(
+ EXPORTING
+ iv_entry_id = ls_entry_rel-entry_id
+ is_document_data = is_document_data
+ IMPORTING
+ ev_name1 = <ls_cpd_data>-name1
+ ev_ort01 = <ls_cpd_data>-ort01
+ ev_land1 = <ls_cpd_data>-land1
+ ev_stcd1 = <ls_cpd_data>-stcd1
+ ev_stceg = ls_accit-stceg ).
+ ls_cpd_new = <ls_cpd_data>.
+ ls_cpd_new-posnr = ls_accit-posnr.
+Commented [ZH5]: Here we move the items which are relevant 
+for the clearing posting. This includes in addition to the original 
+employee vendor clearing accounts e.g. for company paid expenses. 
+Enhance this coding to check for your clearing accounts.
+Commented [ZH6]: In this example, we hardcoded the CPD 
+account. Please add your CPD account code here or enhance the 
+coding in case you want to check if the vendor is already created in 
+your system.
+11
+ APPEND ls_accit TO <ls_clearing>-acd_item.
+ APPEND ls_cpd_new TO <ls_clearing>-acd_fi.
+ ENDIF.
+* Set document type depending on the invoice type
+ CASE lv_inv_type.
+ WHEN 'INV'.
+ <ls_accit_old>-blart = 'KN'.
+ WHEN 'SIM'.
+ <ls_accit_old>-blart = 'RN'.
+ WHEN OTHERS.
+ "Should not happen, but then the document type is not changed
+ ENDCASE.
+ <ls_accit_old>-bldat = lv_inv_date.
+ <ls_accit_old>-stceg = ls_accit-stceg.
+ APPEND <ls_accit_old> TO <ls_new_split>-acd_item.
+ READ TABLE <ls_split_doc>-
+acd_tax INTO ls_acctx WITH KEY buzei = <ls_accit_old>-buzei.
+ IF sy-subrc = 0.
+ APPEND ls_acctx TO <ls_new_split>-acd_tax.
+ ENDIF.
+ ENDLOOP.
+** Extra handling for Cash advances
+ LOOP AT lt_entry_rel INTO ls_entry_rel WHERE journal_id IS INITIAL.
+ READ TABLE <ls_split_doc>-
+acd_item INTO ls_accit WITH KEY posnr = ls_entry_rel-posnr.
+ READ TABLE <ls_split_doc>-
+acd_curr INTO ls_acccr WITH KEY awtyp = ls_accit-awtyp
+ awref = ls_accit
+-awref
+ aworg = ls_accit
+-aworg
+ posnr = ls_accit
+-posnr.
+ ASSERT sy-subrc = 0.
+ ls_acccr-posnr = lines( <ls_clearing>-acd_item ) + 1.
+ APPEND ls_acccr TO <ls_clearing>-acd_curr.
+ READ TABLE <ls_split_doc>-acd_tax INTO ls_acctx WITH KEY buzei = ls_accitbuzei.
+ IF sy-subrc = 0.
+ APPEND ls_acctx TO <ls_clearing>-acd_tax.
+ ENDIF.
+ READ TABLE <ls_split_doc>-
+acd_fi INTO ls_cpd_new WITH KEY awtyp = ls_accit-awtyp
+ awref = ls_accit
+-awref
+ aworg = ls_accit
+-aworg
+ posnr = ls_accit
+-posnr.
+ IF sy-subrc = 0.
+ ls_cpd_new-posnr = lines( <ls_clearing>-acd_item ) + 1.
+ APPEND ls_cpd_new TO <ls_clearing>-acd_fi.
+ ENDIF.
+Commented [ZH7]: In case depending on the document type 
+(Invoice or simplified invoice) it may be relevant to set different 
+posting document types. If this is this case please adjust this coding 
+here
+12
+ ls_accit-posnr = lines( <ls_clearing>-acd_item ) + 1.
+ APPEND ls_accit TO <ls_clearing>-acd_item.
+ ENDLOOP.
+ ENDLOOP.
+** Now condense the employee vendor lines in the clearing posting
+ me->condense_employee_vendor(
+ CHANGING
+ cs_clearing_posting = <ls_clearing> ).
+ REFRESH ct_acc_documents.
+ APPEND LINES OF lt_new_split TO ct_acc_documents.
+ENDMETHOD.
