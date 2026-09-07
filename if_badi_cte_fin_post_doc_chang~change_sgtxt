@@ -1,0 +1,8 @@
+METHOD if_badi_cte_fin_post_doc_chang~change_sgtxt.
+ IF iv_item_type = 'EVD'.
+ CONCATENATE is_document_data-report_key
+ is_entry_data-entry_id
+ INTO cv_sgtxt
+ SEPARATED BY '-'.
+ ENDIF.
+ENDMETHOD.
