@@ -35,6 +35,14 @@ FUNCTION y_te_fi_split_posting_document.
   DATA lv_card_token TYPE string.
   DATA ls_rel TYPE cte_s_fin_post_entry_item_rel.
   DATA lv_card_number TYPE xblnr.
+  DATA:
+    lv_payment     TYPE char10,
+    lv_card_token  TYPE string,
+    lv_card_number TYPE xblnr,
+    ls_accit       TYPE accit,
+    ls_acccr       TYPE acccr,
+    ls_rel         TYPE cte_s_fin_post_entry_item_rel.
+
 
   FIELD-SYMBOLS <fs_add_data> TYPE cte_s_additional_data.
   FIELD-SYMBOLS <fs_split_doc> TYPE cte_s_fin_post_acc_splits.
