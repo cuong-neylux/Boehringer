@@ -29,6 +29,12 @@ FUNCTION y_te_fi_split_posting_document.
   DATA lv_has_ibcp TYPE wdy_boolean.
   DATA lt_new_split TYPE cte_t_fin_post_acc_splits.
   DATA lt_entry_rel TYPE cte_t_fin_post_entry_item_rel.
+  DATA ls_accit TYPE accit.
+  DATA ls_acccr TYPE acccr.
+  DATA lv_payment TYPE char10.
+  DATA lv_card_token TYPE string.
+  DATA ls_rel TYPE cte_s_fin_post_entry_item_rel.
+  DATA lv_card_number TYPE xblnr.
 
   FIELD-SYMBOLS <fs_add_data> TYPE cte_s_additional_data.
   FIELD-SYMBOLS <fs_split_doc> TYPE cte_s_fin_post_acc_splits.
@@ -37,6 +43,7 @@ FUNCTION y_te_fi_split_posting_document.
   FIELD-SYMBOLS <fs_entry> TYPE cte_s_fin_post_doc_entry.
   FIELD-SYMBOLS <fs_accrel> TYPE cte_s_fin_post_entry_item_rel.
   FIELD-SYMBOLS <fs_header> TYPE acchd.
+  FIELD-SYMBOLS <fs_accit> TYPE accit.
 
 ************************************************************************
 * Read the header level information
@@ -108,7 +115,130 @@ FUNCTION y_te_fi_split_posting_document.
             <fs_accrel>-item_type = 'CVD'.    " Credit Card Vendor IS ASSIGNED.
             ENDIF.
 * to prepare: ACD_ITEM, ACD_CURR, ACC_ITEM_ENTRY_REL
+*----------------------------------------------------------------------------------------------------------------
+*--------------------------------------------------------------------
+*           Determine payment type and card token for this ENTRY_ID
+*--------------------------------------------------------------------
+            CLEAR:
+              lv_payment,
+              lv_card_token.
 
+            READ TABLE is_document_data-entry ASSIGNING <fs_entry>
+              WITH KEY entry_id = <fs_accrel>-entry_id.
+
+            IF sy-subrc = 0.
+
+              READ TABLE <fs_entry>-additional_data
+                ASSIGNING <fs_add_data>
+                WITH KEY name = 'ENTRY_PAYMENT_TYPE_CODE'.
+
+              IF sy-subrc = 0.
+                lv_payment = <fs_add_data>-value.
+              ENDIF.
+
+              READ TABLE <fs_entry>-additional_data
+                ASSIGNING <fs_add_data>
+                WITH KEY name = 'ENTRY_CARD_ACCOUNT_ID'.
+
+              IF sy-subrc = 0.
+                lv_card_token = <fs_add_data>-value.
+              ENDIF.
+
+            ENDIF.
+
+*--------------------------------------------------------------------
+*           Copy ACD_ITEM (ACCIT)
+*--------------------------------------------------------------------
+            READ TABLE <fs_split_doc>-acd_item
+              ASSIGNING <fs_accit>
+              WITH KEY posnr = <fs_accrel>-posnr.
+
+            IF sy-subrc = 0.
+
+              ls_accit = <fs_accit>.
+
+              IF lv_payment = 'IBCP'.
+
+                ls_accit-posnr = lines( <fs_ibcp_split>-acd_item ) + 1.
+                APPEND ls_accit TO <fs_ibcp_split>-acd_item.
+
+              ELSE.
+
+                ls_accit-posnr = lines( <fs_cash_split>-acd_item ) + 1.
+                APPEND ls_accit TO <fs_cash_split>-acd_item.
+
+              ENDIF.
+
+*------------------------------------------------------------------
+*             Copy ACD_CURR (ACCCR)
+*------------------------------------------------------------------
+              CLEAR ls_acccr.
+
+              READ TABLE <fs_split_doc>-acd_curr
+                INTO ls_acccr
+                WITH KEY
+                  awtyp = ls_accit-awtyp
+                  awref = ls_accit-awref
+                  aworg = ls_accit-aworg
+                  posnr = <fs_accrel>-posnr.
+
+              IF sy-subrc = 0.
+
+                ls_acccr-posnr = ls_accit-posnr.
+
+                IF lv_payment = 'IBCP'.
+                  APPEND ls_acccr TO <fs_ibcp_split>-acd_curr.
+                ELSE.
+                  APPEND ls_acccr TO <fs_cash_split>-acd_curr.
+                ENDIF.
+
+              ENDIF.
+
+*------------------------------------------------------------------
+*             Copy ACC_ITEM_ENTRY_REL
+*------------------------------------------------------------------
+              ls_rel = <fs_accrel>.
+              ls_rel-posnr = ls_accit-posnr.
+
+              IF lv_payment = 'IBCP'.
+                APPEND ls_rel TO <fs_ibcp_split>-acc_item_entry_rel.
+              ELSE.
+                APPEND ls_rel TO <fs_cash_split>-acc_item_entry_rel.
+              ENDIF.
+
+*------------------------------------------------------------------
+*             Populate BKPF-XBLNR on IBCP document
+*------------------------------------------------------------------
+              IF lv_payment = 'IBCP'
+                 AND lv_card_token IS NOT INITIAL.
+
+*               Replace this FM with your project's existing token->card lookup
+                CALL FUNCTION 'Y_TE_GET_CARD_NUMBER'
+                  EXPORTING
+                    iv_card_token  = lv_card_token
+                  IMPORTING
+                    ev_card_number = lv_card_number
+                  EXCEPTIONS
+                    OTHERS         = 1.
+
+                IF sy-subrc = 0
+                   AND lv_card_number IS NOT INITIAL.
+
+                  READ TABLE <fs_ibcp_split>-acd_header
+                    ASSIGNING <fs_header>
+                    INDEX 1.
+
+                  IF sy-subrc = 0
+                     AND <fs_header>-xblnr IS INITIAL.
+
+                    <fs_header>-xblnr = lv_card_number.
+
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+
+            ENDIF.
+*----------------------------------------------------------------------------------------------------------------
           ENDIF.
         ENDLOOP.
       ENDLOOP.
