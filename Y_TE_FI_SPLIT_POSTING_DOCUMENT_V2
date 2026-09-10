@@ -31,14 +31,12 @@ FUNCTION y_te_fi_split_posting_document.
   DATA lt_entry_rel TYPE cte_t_fin_post_entry_item_rel.
   DATA lv_payment     TYPE char10.
   DATA lv_card_token  TYPE cte_fin_post_card_account_id.
-  DATA lv_card_number TYPE xblnr.
   DATA ls_accit       TYPE accit.
   DATA ls_acccr       TYPE acccr.
   DATA ls_rel         TYPE cte_s_fin_post_entry_item_rel.
   DATA lt_tokens                   TYPE cte_t_fin_post_ccard_token.
   DATA lo_cte_fnd_error_handler    TYPE REF TO cl_cte_fnd_error_handler.
   DATA lt_ccard_token              TYPE cl_cte_fin_post_ccard_services=>tt_token_cardnr_relation.
-  DATA ls_ccard_token              TYPE cl_cte_fin_post_ccard_services=>ty_token_cardnr_relation.
 
   FIELD-SYMBOLS <fs_add_data> TYPE cte_s_additional_data.
   FIELD-SYMBOLS <fs_split_doc> TYPE cte_s_fin_post_acc_splits.
@@ -49,6 +47,7 @@ FUNCTION y_te_fi_split_posting_document.
   FIELD-SYMBOLS <fs_header> TYPE acchd.
   FIELD-SYMBOLS <fs_accit> TYPE accit.
   FIELD-SYMBOLS <fs_acccr> TYPE acccr.
+  FIELD-SYMBOLS <fs_ccard_token> TYPE cl_cte_fin_post_ccard_services=>ty_token_cardnr_relation.
 
 ************************************************************************
 * Read the header level information
@@ -75,18 +74,13 @@ FUNCTION y_te_fi_split_posting_document.
 * Split post IBCP / CASH
 * Write Credit card number into BKPF-XBLNR for IBCP
 ************************************************************************
-  CREATE OBJECT lo_cte_fnd_error_handler
-    EXPORTING
-      iv_system_key = is_document_data-system_key.
 
   IF lt_ibcp IS NOT INITIAL.
 *    check if there is IBCP payment type code
     lv_has_ibcp = abap_false.
     LOOP AT is_document_data-entry ASSIGNING <fs_entry>.
       IF <fs_entry> IS ASSIGNED.
-        READ TABLE <fs_entry>-additional_data
-         ASSIGNING <fs_add_data>
-        WITH KEY name = 'ENTRY_PAYMENT_TYPE_CODE' .
+        READ TABLE <fs_entry>-additional_data ASSIGNING <fs_add_data> WITH KEY name = 'ENTRY_PAYMENT_TYPE_CODE' .
         IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED .
           IF <fs_add_data>-value = 'IBCP'.  "IBCP
             lv_has_ibcp = abap_true.
@@ -106,10 +100,10 @@ FUNCTION y_te_fi_split_posting_document.
 
         CLEAR: lt_new_split.
 *        prepare empty lines in lt_new_split
-        APPEND INITIAL LINE TO lt_new_split ASSIGNING <fs_cash_split>.
-        APPEND INITIAL LINE TO lt_new_split ASSIGNING <fs_ibcp_split>.
+        APPEND INITIAL LINE TO lt_new_split ASSIGNING <fs_cash_split>.    "CASH
+        APPEND INITIAL LINE TO lt_new_split ASSIGNING <fs_ibcp_split>.    "IBCP
 *        Prepare ACD_HEADER
-        READ TABLE <fs_split_doc>-acd_header INTO <fs_header> INDEX 1.
+        READ TABLE <fs_split_doc>-acd_header ASSIGNING <fs_header> INDEX 1.
         IF sy-subrc = 0 AND <fs_header> IS ASSIGNED.
           APPEND <fs_header> TO <fs_cash_split>-acd_header.
           APPEND <fs_header> TO <fs_ibcp_split>-acd_header.
@@ -117,27 +111,20 @@ FUNCTION y_te_fi_split_posting_document.
 
         LOOP AT lt_entry_rel ASSIGNING <fs_accrel>.
           IF <fs_accrel> IS ASSIGNED.
-*            split EVD/EDB and CVD/CCD, there is no TAX, CAD or CAL
-            IF <fs_accrel>-item_type = 'EVD' OR " Employee Vendor
-            <fs_accrel>-item_type = 'EDB'.    " Employee Vendor Debit
-            ELSEIF <fs_accrel>-item_type = 'CCD' OR    "Credit Card Vendor Debit
-            <fs_accrel>-item_type = 'CVD'.    " Credit Card Vendor IS ASSIGNED.
-            ENDIF.
-* to prepare: ACD_ITEM, ACD_CURR, ACC_ITEM_ENTRY_REL
 ************************************************************************
 *           Determine payment type and card token for this ENTRY_ID
 ************************************************************************
             CLEAR: lv_payment, lv_card_token.
             READ TABLE is_document_data-entry ASSIGNING <fs_entry> WITH KEY entry_id = <fs_accrel>-entry_id.
 
-            IF sy-subrc = 0.
+            IF sy-subrc = 0 AND <fs_entry> IS ASSIGNED.
               lv_card_token = <fs_entry>-card_account_id.
 
               READ TABLE <fs_entry>-additional_data
                 ASSIGNING <fs_add_data>
                 WITH KEY name = 'ENTRY_PAYMENT_TYPE_CODE'.
 
-              IF sy-subrc = 0.
+              IF sy-subrc = 0 AND <fs_add_data> IS ASSIGNED.
                 lv_payment = <fs_add_data>-value.
               ENDIF.
             ENDIF.
@@ -148,14 +135,11 @@ FUNCTION y_te_fi_split_posting_document.
             CLEAR ls_acccr.
             READ TABLE <fs_split_doc>-acd_curr ASSIGNING <fs_acccr> WITH KEY posnr = <fs_accrel>-posnr.
 
-            IF sy-subrc = 0.
+            IF sy-subrc = 0 AND <fs_acccr> IS ASSIGNED.
               ls_acccr = <fs_acccr>.
-              ls_acccr-posnr = ls_accit-posnr.
               IF lv_payment = 'IBCP'.
-                ls_acccr-posnr = lines( <fs_ibcp_split>-acd_curr ) + 1.
                 APPEND ls_acccr TO <fs_ibcp_split>-acd_curr.
               ELSE.
-                ls_acccr-posnr = lines( <fs_cash_split>-acd_curr ) + 1.
                 APPEND ls_acccr TO <fs_cash_split>-acd_curr.
               ENDIF.
             ENDIF.
@@ -163,8 +147,8 @@ FUNCTION y_te_fi_split_posting_document.
 ************************************************************************
 *             Copy ACC_ITEM_ENTRY_REL
 ************************************************************************
+            CLEAR: ls_rel.
             ls_rel = <fs_accrel>.
-            ls_rel-posnr = ls_accit-posnr.
 
             IF lv_payment = 'IBCP'.
               APPEND ls_rel TO <fs_ibcp_split>-acc_item_entry_rel.
@@ -176,14 +160,13 @@ FUNCTION y_te_fi_split_posting_document.
 *           Copy ACD_ITEM (ACCIT)
 ************************************************************************
             READ TABLE <fs_split_doc>-acd_item ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr.
-            IF sy-subrc = 0.
+            IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+              CLEAR: ls_accit.
               ls_accit = <fs_accit>.
 
               IF lv_payment = 'IBCP'.
-                ls_accit-posnr = lines( <fs_ibcp_split>-acd_item ) + 1.
                 APPEND ls_accit TO <fs_ibcp_split>-acd_item.
               ELSE.
-                ls_accit-posnr = lines( <fs_cash_split>-acd_item ) + 1.
                 APPEND ls_accit TO <fs_cash_split>-acd_item.
               ENDIF.
             ENDIF.
@@ -192,10 +175,14 @@ FUNCTION y_te_fi_split_posting_document.
 *             Populate BKPF-XBLNR on IBCP document
 ************************************************************************
             IF lv_payment = 'IBCP' AND lv_card_token IS NOT INITIAL.
+              CREATE OBJECT lo_cte_fnd_error_handler
+                EXPORTING
+                  iv_system_key = is_document_data-system_key.
 
-* Retrieve card number from the token
+*             Retrieve card number from the token
               CLEAR: lt_ccard_token, lt_tokens.
               APPEND lv_card_token TO lt_tokens.
+
               CALL METHOD cl_cte_fin_post_ccard_services=>get_ccard_nr_from_token
                 EXPORTING
                   iv_system_key    = is_document_data-system_key
@@ -204,13 +191,14 @@ FUNCTION y_te_fi_split_posting_document.
                 IMPORTING
                   et_token_cardnr  = lt_ccard_token.
 
-              IF sy-subrc = 0 AND lines( lt_ccard_token ) > 0.
-                READ TABLE lt_ccard_token INTO ls_ccard_token INDEX 1.
+              IF lines( lt_ccard_token ) > 0.
+                UNASSIGN <fs_ccard_token>.
+                READ TABLE lt_ccard_token ASSIGNING <fs_ccard_token> INDEX 1.
                 IF sy-subrc = 0.
                   UNASSIGN <fs_accit>.
-                  READ TABLE <fs_ibcp_split>-acd_item ASSIGNING <fs_accit> WITH KEY posnr = ls_accit-posnr.
-                  IF sy-subrc = 0.
-                    <fs_accit>-xblnr = ls_ccard_token-cardnr.
+                  READ TABLE <fs_ibcp_split>-acd_item ASSIGNING <fs_accit> WITH KEY posnr = <fs_accrel>-posnr.
+                  IF sy-subrc = 0 AND <fs_accit> IS ASSIGNED.
+                    <fs_accit>-xblnr = <fs_ccard_token>-cardnr.
                   ENDIF.
                 ENDIF.
               ENDIF.
@@ -220,7 +208,7 @@ FUNCTION y_te_fi_split_posting_document.
         ENDLOOP.
       ENDLOOP.
 
-      REFRESH ct_acc_documents.
+      CLEAR ct_acc_documents.
       APPEND LINES OF lt_new_split TO ct_acc_documents.
     ENDIF.
   ENDIF.
