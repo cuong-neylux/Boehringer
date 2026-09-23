@@ -1,2 +1,4 @@
 Table: YTE_C_IBCP
+Customizing table for countries with IBCP pay. type code
 Tcode: YTE_FI_C_IBCP
+Maintain CoCode for IBCP posting
